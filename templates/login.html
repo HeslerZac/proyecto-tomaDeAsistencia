@@ -1,0 +1,15 @@
+{% extends 'base.html' %}
+{% block content %}
+<article>
+  <h4>Iniciar sesión</h4>
+  <form method="post" action="{{ url_for('login') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+    <div class="grid">
+      <input type="text" name="username" placeholder="Usuario" required />
+      <input type="password" name="password" placeholder="Contraseña" required />
+      <button type="submit">Entrar</button>
+    </div>
+  </form>
+</article>
+{% endblock %}
+

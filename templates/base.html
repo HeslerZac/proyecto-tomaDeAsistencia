@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Asistencias</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css" />
+  <style>
+    .ok { color: #0a7; }
+    .fail { color: #c22; }
+    .muted { color: #888; }
+    .tag { padding: 2px 6px; border-radius: 6px; background: #eee; }
+    /* Kiosk mode for Toma */
+    body.kiosk main { max-width: 98vw; }
+    body.kiosk table { font-size: 1.25rem; }
+    body.kiosk h4 { font-size: 1.6rem; }
+    body.kiosk nav { display: none; }
+  </style>
+  {% block head %}{% endblock %}
+  </head>
+<body>
+  <main class="container">
+    <h2>Proyecto de Asistencias</h2>
+    <p class="muted">
+      {% if current_user and current_user.is_authenticated %}
+        Conectado como {{ current_user.username }} · <a href="{{ url_for('logout') }}">Salir</a>
+      {% else %}
+        <a href="{{ url_for('login') }}">Ingresar</a>
+      {% endif %}
+    </p>
+    <nav>
+      <ul>
+        <li><a href="{{ url_for('index', tab='registrar') }}" {% if tab=='registrar' %}aria-current="page"{% endif %}>Registrar</a></li>
+        <li><a href="{{ url_for('index', tab='personas') }}" {% if tab=='personas' %}aria-current="page"{% endif %}>Personas</a></li>
+        <li><a href="{{ url_for('index', tab='asistencias') }}" {% if tab=='asistencias' %}aria-current="page"{% endif %}>Asistencias</a></li>
+        <li><a href="{{ url_for('index', tab='reportes') }}" {% if tab=='reportes' %}aria-current="page"{% endif %}>Reportes</a></li>
+        <li><a href="{{ url_for('index', tab='toma') }}" {% if tab=='toma' %}aria-current="page"{% endif %}>Toma</a></li>
+        <li><a href="{{ url_for('index', tab='mensajes') }}" {% if tab=='mensajes' %}aria-current="page"{% endif %}>Mensajes</a></li>
+        {% if current_user and current_user.is_authenticated and current_user.is_admin %}
+        <li><a href="{{ url_for('users') }}" {% if tab=='users' %}aria-current="page"{% endif %}>Usuarios</a></li>
+        {% endif %}
+      </ul>
+    </nav>
+    {% with messages = get_flashed_messages(with_categories=True) %}
+      {% if messages %}
+        <section>
+          {% for category, message in messages %}
+            <div class="{{ 'alert' }}" data-category="{{ category }}" style="border-left:4px solid; padding:.5rem 1rem; margin:.5rem 0; {% if category=='success' %}border-color:#0a7;{% elif category=='error' %}border-color:#c22;{% elif category=='warning' %}border-color:#d9a500;{% else %}border-color:#888;{% endif %}">
+              {{ message }}
+            </div>
+          {% endfor %}
+        </section>
+      {% endif %}
+    {% endwith %}
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

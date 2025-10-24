@@ -1,0 +1,40 @@
+{% extends 'base.html' %}
+{% block content %}
+<article>
+  <h4>Crear usuario</h4>
+  <form method="post" action="{{ url_for('users') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+    <div class="grid">
+      <input type="text" name="username" placeholder="Usuario" required />
+      <input type="password" name="password" placeholder="Contraseña" required />
+      <label style="display:flex;align-items:center;gap:.4rem;">
+        <input type="checkbox" name="is_admin" value="1" /> Administrador
+      </label>
+      <button type="submit">Crear</button>
+    </div>
+  </form>
+</article>
+
+<article>
+  <h4>Usuarios</h4>
+  <table>
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>Usuario</th>
+        <th>Admin</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for u in users %}
+      <tr>
+        <td>{{ u.id }}</td>
+        <td>{{ u.username }}</td>
+        <td>{% if u.is_admin %}<span class="ok">Sí</span>{% else %}<span class="muted">No</span>{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</article>
+{% endblock %}
+

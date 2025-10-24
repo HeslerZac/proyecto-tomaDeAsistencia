@@ -1,0 +1,392 @@
+{% extends 'base.html' %}
+{% block content %}
+
+{% if tab=='registrar' %}
+<article>
+  <h4>Registrar nueva Persona</h4>
+  <form method="post" action="{{ url_for('registrar') }}">
+    <div class="grid">
+      <input type="text" name="nombre" placeholder="Nombre" required />
+      <select name="rol" required>
+        <option value="ALUMNO">ALUMNO</option>
+        <option value="PROFESOR">PROFESOR</option>
+        <option value="PERSONAL">PERSONAL</option>
+      </select>
+      <input type="text" name="grado" placeholder="Grado/Área (opcional)" />
+      <input type="text" name="seccion" placeholder="Sección/Turno (opcional)" />
+      <input type="text" name="documento" placeholder="Documento (DNI/Código)" />
+      <button type="submit">Registrar y capturar huella</button>
+    </div>
+  </form>
+  <p class="muted">El navegador esperará la respuesta del Arduino. Mantén el dedo en el sensor cuando se indique.</p>
+</article>
+{% endif %}
+
+{% if tab=='personas' %}
+<article>
+  <h4>Personas <small class="muted"><a id="export-personas-link" href="/api/personas.csv?q={{ q }}&rol={{ rol }}{% if solo_activos %}&solo_activos=1{% endif %}&desde={{ desde }}&hasta={{ hasta }}">Exportar CSV</a></small></h4>
+  <form method="get" action="/">
+    <input type="hidden" name="tab" value="personas" />
+    <div class="grid">
+      <input type="search" name="q" placeholder="Buscar nombre/documento/grado/sección" value="{{ q }}" />
+      <select name="rol">
+        <option value="">Todos los roles</option>
+        <option value="ALUMNO" {% if rol=='ALUMNO' %}selected{% endif %}>ALUMNO</option>
+        <option value="PROFESOR" {% if rol=='PROFESOR' %}selected{% endif %}>PROFESOR</option>
+        <option value="PERSONAL" {% if rol=='PERSONAL' %}selected{% endif %}>PERSONAL</option>
+      </select>
+      <label style="display:flex;align-items:center;gap:.4rem;">
+        <input type="checkbox" name="solo_activos" value="1" {% if solo_activos %}checked{% endif %} /> Solo activos
+      </label>
+      <select name="per_page">
+        <option value="10" {% if per_page==10 %}selected{% endif %}>10</option>
+        <option value="15" {% if per_page==15 %}selected{% endif %}>15</option>
+        <option value="25" {% if per_page==25 %}selected{% endif %}>25</option>
+        <option value="50" {% if per_page==50 %}selected{% endif %}>50</option>
+      </select>
+      <button type="submit">Aplicar</button>
+      <span class="muted">Total: {{ total }}</span>
+    </div>
+  </form>
+  <table>
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>Nombre</th>
+        <th>Rol</th>
+        <th>Grado</th>
+        <th>Sección</th>
+        <th>Documento</th>
+        <th>Estado</th>
+        <th>Huella</th>
+        <th>Acciones</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for p in personas %}
+      <tr>
+        <td>{{ p.id }}</td>
+        <td>{{ p.nombre }}</td>
+        <td><span class="tag">{{ p.rol }}</span></td>
+        <td>{{ p.grado or '—' }}</td>
+        <td>{{ p.seccion or '—' }}</td>
+        <td>{{ p.documento or '—' }}</td>
+        <td>{% if p.activo %}<span class="ok">ACTIVO</span>{% else %}<span class="fail">INACTIVO</span>{% endif %}</td>
+        <td>{% if p.huella_guardada %}<span class="ok">OK</span>{% else %}<span class="fail">PENDIENTE</span>{% endif %}</td>
+        <td>
+          <div style="display:flex; gap:.5rem; align-items:center;">
+            <form method="post" action="{{ url_for('toggle_persona', pid=p.id) }}">
+              <button type="submit" class="secondary">{% if p.activo %}Desactivar{% else %}Activar{% endif %}</button>
+            </form>
+            {% if p.huella_guardada %}
+            <form method="post" action="{{ url_for('eliminar', pid=p.id) }}" onsubmit="return confirm('¿Eliminar huella del ID {{p.id}}?');">
+              <button type="submit" class="secondary">Eliminar huella</button>
+            </form>
+            {% endif %}
+            <form method="post" action="{{ url_for('borrar_persona', pid=p.id) }}" onsubmit="return confirm('¿Eliminar PERSONA ID {{p.id}} (y asistencias)?');">
+              <label style="margin-right:.5rem;">
+                <input type="checkbox" name="force" value="1" />
+                Forzar si falla sensor
+              </label>
+              <button type="submit" class="contrast">Eliminar persona</button>
+            </form>
+            <details>
+              <summary>Editar</summary>
+              <form method="post" action="{{ url_for('actualizar_persona', pid=p.id) }}" style="margin-top:.5rem;">
+                <div class="grid">
+                  <input type="text" name="nombre" value="{{ p.nombre }}" placeholder="Nombre" required />
+                  <select name="rol" required>
+                    <option value="ALUMNO" {% if p.rol=='ALUMNO' %}selected{% endif %}>ALUMNO</option>
+                    <option value="PROFESOR" {% if p.rol=='PROFESOR' %}selected{% endif %}>PROFESOR</option>
+                    <option value="PERSONAL" {% if p.rol=='PERSONAL' %}selected{% endif %}>PERSONAL</option>
+                  </select>
+                  <input type="text" name="grado" value="{{ p.grado }}" placeholder="Grado/Área" />
+                  <input type="text" name="seccion" value="{{ p.seccion }}" placeholder="Sección/Turno" />
+                  <input type="text" name="documento" value="{{ p.documento }}" placeholder="Documento" />
+                  <label style="display:flex;align-items:center;gap:.4rem;">
+                    <input type="checkbox" name="activo" value="1" {% if p.activo %}checked{% endif %} /> Activo
+                  </label>
+                  <button type="submit">Guardar</button>
+                </div>
+              </form>
+            </details>
+          </div>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <nav aria-label="pagination" style="display:flex; gap:.5rem; align-items:center;">
+    {% set prev_page = page-1 %}
+    {% set next_page = page+1 %}
+    <a role="button" class="secondary" href="{{ url_for('index', tab='personas', q=q, rol=rol, solo_activos=1 if solo_activos else None, page=1, per_page=per_page) }}" {% if page<=1 %}aria-disabled="true"{% endif %}>Primera</a>
+    <a role="button" class="secondary" href="{{ url_for('index', tab='personas', q=q, rol=rol, solo_activos=1 if solo_activos else None, page=prev_page, per_page=per_page) }}" {% if page<=1 %}aria-disabled="true"{% endif %}>Anterior</a>
+    <span class="muted">Página {{ page }} / {{ pages }}</span>
+    <a role="button" class="secondary" href="{{ url_for('index', tab='personas', q=q, rol=rol, solo_activos=1 if solo_activos else None, page=next_page, per_page=per_page) }}" {% if page>=pages %}aria-disabled="true"{% endif %}>Siguiente</a>
+    <a role="button" class="secondary" href="{{ url_for('index', tab='personas', q=q, rol=rol, solo_activos=1 if solo_activos else None, page=pages, per_page=per_page) }}" {% if page>=pages %}aria-disabled="true"{% endif %}>Última</a>
+  </nav>
+</article>
+{% endif %}
+
+{% if tab=='asistencias' %}
+<article>
+  <h4>Asistencias</h4>
+  <form method="get" action="/">
+    <input type="hidden" name="tab" value="asistencias" />
+    <div class="grid">
+      <input type="date" name="desde" value="{{ desde }}" placeholder="Desde" />
+      <input type="date" name="hasta" value="{{ hasta }}" placeholder="Hasta" />
+      <select name="rol">
+        <option value="">Todos los roles</option>
+        <option value="ALUMNO" {% if rol=='ALUMNO' %}selected{% endif %}>ALUMNO</option>
+        <option value="PROFESOR" {% if rol=='PROFESOR' %}selected{% endif %}>PROFESOR</option>
+        <option value="PERSONAL" {% if rol=='PERSONAL' %}selected{% endif %}>PERSONAL</option>
+      </select>
+      <button type="submit">Filtrar</button>
+      <a id="export-csv-link" href="/api/asistencias.csv?desde={{ desde }}&hasta={{ hasta }}&rol={{ rol }}" role="button" class="secondary">Exportar CSV</a>
+    </div>
+  </form>
+  <table>
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>Persona</th>
+        <th>Rol</th>
+        <th>Fecha/Hora</th>
+      </tr>
+    </thead>
+    <tbody id="asistencias-body">
+      {% for a in asistencias %}
+      <tr>
+        <td>{{ a.id }}</td>
+        <td>{{ a.persona.nombre }} (ID {{ a.persona.id }})</td>
+        <td><span class="tag">{{ a.persona.rol }}</span></td>
+        <td>{{ a.timestamp|localdt }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <small class="muted">Zona horaria: {{ timezone_name }} • Actualizado: <span id="asistencias-updated">—</span></small>
+</article>
+{% endif %}
+
+{% if tab=='mensajes' %}
+<article>
+  <h4>Mensajes del Arduino (recientes) <small class="muted">Serial: <span id="serial-status">—</span></small></h4>
+  <details open>
+    <summary>Ver/Ocultar</summary>
+    <pre id="serial-log" style="max-height: 260px; overflow:auto; background:#111; color:#ddd; padding:1rem;">{% for line in serial_log %}{{ line }}
+{% endfor %}</pre>
+  </details>
+</article>
+{% endif %}
+
+{% if tab=='toma' %}
+<article>
+  <h4>Toma de Asistencia <small class="muted">Serial: <span id="serial-status">—</span></small>
+    <button type="button" id="btn-kiosk" class="secondary" style="float:right">Pantalla completa</button>
+  </h4>
+  <p class="muted">Coloca el dedo en el lector cuando esté conectado. Las lecturas aparecerán aquí en tiempo real.</p>
+  <table>
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>Persona</th>
+        <th>Rol</th>
+        <th>Fecha/Hora</th>
+      </tr>
+    </thead>
+    <tbody id="toma-body">
+      {% for a in asistencias %}
+      <tr>
+        <td>{{ a.id }}</td>
+        <td>{{ a.persona.nombre if a.persona else '—' }} (ID {{ a.persona.id if a.persona else a.person_id }})</td>
+        <td><span class="tag">{{ a.persona.rol if a.persona else '—' }}</span></td>
+        <td>{{ a.timestamp|localdt }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <small class="muted">Mostrando las 20 asistencias más recientes.</small>
+</article>
+{% endif %}
+
+{% if tab=='reportes' %}
+<article>
+  <h4>Reportes (Entrada/Salida derivado)</h4>
+  <form method="get" action="/">
+    <input type="hidden" name="tab" value="reportes" />
+    <div class="grid">
+      <input type="date" name="desde" value="{{ desde }}" placeholder="Desde" />
+      <input type="date" name="hasta" value="{{ hasta }}" placeholder="Hasta" />
+      <select name="rol">
+        <option value="">Todos los roles</option>
+        <option value="ALUMNO" {% if rol=='ALUMNO' %}selected{% endif %}>ALUMNO</option>
+        <option value="PROFESOR" {% if rol=='PROFESOR' %}selected{% endif %}>PROFESOR</option>
+        <option value="PERSONAL" {% if rol=='PERSONAL' %}selected{% endif %}>PERSONAL</option>
+      </select>
+      <button type="submit">Filtrar</button>
+      <a id="export-reportes-csv" href="/api/reportes.csv?desde={{ desde }}&hasta={{ hasta }}&rol={{ rol }}" role="button" class="secondary">Exportar CSV</a>
+    </div>
+  </form>
+  <table>
+    <thead>
+      <tr>
+        <th>Fecha</th>
+        <th>Persona</th>
+        <th>Rol</th>
+        <th>Grado</th>
+        <th>Sección</th>
+        <th>Entrada</th>
+        <th>Salida</th>
+        <th>Duración (min)</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in report_rows %}
+      <tr>
+        <td>{{ r.fecha }}</td>
+        <td>{{ r.nombre }} (ID {{ r.person_id }})</td>
+        <td><span class="tag">{{ r.rol }}</span></td>
+        <td>{{ r.grado or '—' }}</td>
+        <td>{{ r.seccion or '—' }}</td>
+        <td>{{ r.entrada }}</td>
+        <td>{{ r.salida if r.salida else '—' }}</td>
+        <td>{{ r.duracion_min }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</article>
+{% endif %}
+
+{% if tab in ['mensajes','toma'] %}
+<script>
+  async function refreshSerial() {
+    try {
+      const r = await fetch('/serial?limit=100', { headers: { 'Accept': 'application/json' } });
+      if (!r.ok) return;
+      const data = await r.json();
+      const pre = document.getElementById('serial-log');
+      if (pre && Array.isArray(data.log)) pre.textContent = data.log.join('\n');
+      const statusEl = document.getElementById('serial-status');
+      if (statusEl) {
+        const open = !!data.serial_open;
+        statusEl.textContent = open ? 'Conectado' : 'Desconectado';
+        statusEl.style.color = open ? '#0a7' : '#c22';
+      }
+    } catch (e) {}
+  }
+  refreshSerial();
+  setInterval(refreshSerial, 2000);
+</script>
+{% endif %}
+
+{% if tab=='asistencias' %}
+<script>
+async function refreshAsistencias() {
+  try {
+    const rolSel = document.querySelector('select[name="rol"]');
+    const desdeInp = document.querySelector('input[name="desde"]');
+    const hastaInp = document.querySelector('input[name="hasta"]');
+    const rol = rolSel ? rolSel.value : '';
+    const desde = desdeInp ? desdeInp.value : '';
+    const hasta = hastaInp ? hastaInp.value : '';
+    const params = new URLSearchParams();
+    if (rol) params.set('rol', rol);
+    if (desde) params.set('desde', desde);
+    if (hasta) params.set('hasta', hasta);
+    params.set('limit', '100');
+    const r = await fetch('/api/asistencias?' + params.toString(), { headers: { 'Accept': 'application/json' } });
+    if (!r.ok) return;
+    const data = await r.json();
+    const tbody = document.getElementById('asistencias-body');
+    if (!tbody || !Array.isArray(data)) return;
+    const rows = data.map(a => {
+      const nombre = a.persona && a.persona.nombre ? a.persona.nombre : '—';
+      const pid = a.persona && a.persona.id != null ? a.persona.id : a.person_id;
+      const rol = a.persona && a.persona.rol ? a.persona.rol : '—';
+      const iso = a.timestamp_utc || a.timestamp;
+      let ts = iso; try { ts = new Date(iso).toLocaleString(); } catch (_) {}
+      return `<tr>
+        <td>${a.id}</td>
+        <td>${nombre} (ID ${pid})</td>
+        <td><span class="tag">${rol}</span></td>
+        <td>${ts}</td>
+      </tr>`;
+    }).join('');
+    tbody.innerHTML = rows;
+    const up = document.getElementById('asistencias-updated');
+    if (up) up.textContent = new Date().toLocaleTimeString();
+  } catch (e) {}
+}
+refreshAsistencias();
+setInterval(refreshAsistencias, 5000);
+
+function updateExportLink() {
+  const rolSel = document.querySelector('select[name="rol"]');
+  const desdeInp = document.querySelector('input[name="desde"]');
+  const hastaInp = document.querySelector('input[name="hasta"]');
+  const rol = rolSel ? rolSel.value : '';
+  const desde = desdeInp ? desdeInp.value : '';
+  const hasta = hastaInp ? hastaInp.value : '';
+  const params = new URLSearchParams();
+  if (rol) params.set('rol', rol);
+  if (desde) params.set('desde', desde);
+  if (hasta) params.set('hasta', hasta);
+  const a = document.getElementById('export-csv-link');
+  if (a) a.href = '/api/asistencias.csv' + (params.toString() ? '?' + params.toString() : '');
+  const a2 = document.getElementById('export-personas-link');
+  if (a2) a2.href = '/api/personas.csv' + (params.toString() ? '?' + params.toString() : '');
+}
+updateExportLink();
+document.querySelector('select[name="rol"]').addEventListener('change', updateExportLink);
+document.querySelector('input[name="desde"]').addEventListener('change', updateExportLink);
+document.querySelector('input[name="hasta"]').addEventListener('change', updateExportLink);
+</script>
+{% endif %}
+
+{% if tab=='toma' %}
+<script>
+async function refreshToma() {
+  try {
+    const r = await fetch('/api/asistencias?limit=20', { headers: { 'Accept': 'application/json' } });
+    if (!r.ok) return;
+    const data = await r.json();
+    const tbody = document.getElementById('toma-body');
+    if (!tbody || !Array.isArray(data)) return;
+    const rows = data.map(a => {
+      const nombre = a.persona && a.persona.nombre ? a.persona.nombre : '—';
+      const pid = a.persona && a.persona.id != null ? a.persona.id : a.person_id;
+      const rol = a.persona && a.persona.rol ? a.persona.rol : '—';
+      const iso = a.timestamp_utc || a.timestamp;
+      let ts = iso; try { ts = new Date(iso).toLocaleString(); } catch (_) {}
+      return `<tr><td>${a.id}</td><td>${nombre} (ID ${pid})</td><td><span class="tag">${rol}</span></td><td>${ts}</td></tr>`;
+    }).join('');
+    tbody.innerHTML = rows;
+  } catch (e) {}
+}
+refreshToma();
+setInterval(refreshToma, 2000);
+
+// Fullscreen / kiosk
+const btn = document.getElementById('btn-kiosk');
+if (btn) {
+  btn.addEventListener('click', async () => {
+    try {
+      if (!document.fullscreenElement) {
+        await document.documentElement.requestFullscreen();
+        document.body.classList.add('kiosk');
+        btn.textContent = 'Salir de pantalla completa';
+      } else {
+        await document.exitFullscreen();
+        document.body.classList.remove('kiosk');
+        btn.textContent = 'Pantalla completa';
+      }
+    } catch (e) {}
+  });
+}
+</script>
+{% endif %}
+
+{% endblock %}
