@@ -6,10 +6,32 @@
   <title>Asistencias</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css" />
   <style>
-    .ok { color: #0a7; }
-    .fail { color: #c22; }
-    .muted { color: #888; }
-    .tag { padding: 2px 6px; border-radius: 6px; background: #eee; }
+    :root{ --gap: .6rem; }
+    .ok { color: #0aa36f; font-weight: 600; }
+    .fail { color: #d23f3f; font-weight: 600; }
+    .muted { color: #8a8f98; }
+    .tag { padding: 2px 8px; border-radius: 999px; background: #e9ecef; color:#333; font-size:.85rem; }
+    [data-theme="dark"] .tag { background: #2f3742; color:#cfd6df; }
+
+    /* Responsive nav (scrollable on small screens) */
+    nav ul { gap: .25rem .75rem; overflow-x: auto; white-space: nowrap; padding-bottom: .25rem; }
+    nav ul::-webkit-scrollbar{ height:6px }
+
+    /* Tables: wrap to enable horizontal scroll on small screens */
+    .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    table { width: 100%; border-collapse: collapse; }
+    thead th { position: sticky; top: 0; background: var(--pico-card-background-color, var(--pico-background-color)); z-index: 1; }
+    th, td { white-space: nowrap; }
+
+    /* Actions area */
+    .actions { display:flex; gap: var(--gap); flex-wrap: wrap; align-items: center; }
+
+    /* Compact form grid on small screens */
+    @media (max-width: 920px){
+      form .grid { grid-template-columns: 1fr !important; }
+      form .grid > * { min-width: 0; }
+    }
+
     /* Kiosk mode for Toma */
     body.kiosk main { max-width: 98vw; }
     body.kiosk table { font-size: 1.25rem; }
