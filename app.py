@@ -8,6 +8,7 @@ from sqlalchemy import or_
 
 from flask import Flask, jsonify, redirect, render_template, request, url_for, flash, make_response
 import csv
+import json
 from io import StringIO
 from flask_sqlalchemy import SQLAlchemy
 
@@ -107,17 +108,72 @@ class SerialManager:
         self._last_del: Dict[int, Tuple[str, float]] = {}
         from collections import deque
         self._log = deque(maxlen=200)  # recent serial lines
+        self._current_port: Optional[str] = None
+        self._last_fnd: Dict[int, datetime] = {}
         self._lock = threading.Lock()
+
+    def _normalize_port(self, name: str) -> str:
+        # Windows COM ports > 9 sometimes need the \\.\ prefix for some stacks.
+        try:
+            up = name.upper()
+            if up.startswith("COM") and up[3:].isdigit() and int(up[3:]) >= 10:
+                return r"\\.\%s" % name
+        except Exception:
+            pass
+        return name
+
+    def _scan_candidates(self):
+        cands = []
+        try:
+            ports = list(serial.tools.list_ports.comports()) if serial else []
+            for p in ports:
+                desc = (p.description or "").lower()
+                if any(k in desc for k in ["arduino", "ch340", "cp210", "usb-serial", "silicon labs", "prolific", "ftdi"]):
+                    cands.append(p.device)
+            # fallback: include all devices if none matched
+            if not cands:
+                cands = [p.device for p in ports]
+        except Exception:
+            pass
+        return cands
 
     def open(self):
         if serial is None:
             self.app.logger.error("pyserial not installed; serial disabled")
             return
         try:
-            self._ser = serial.Serial(self.port_name, self.baudrate, timeout=self.timeout)
-            self.app.logger.info(f"Serial abierto en {self.port_name} @ {self.baudrate}")
+            port_cfg = (self.port_name or "").strip()
+            if not port_cfg or port_cfg.upper() in {"AUTO"}:
+                # try auto-detect
+                for cand in self._scan_candidates():
+                    try:
+                        norm = self._normalize_port(cand)
+                        self._ser = serial.Serial(norm, self.baudrate, timeout=self.timeout)
+                        self._current_port = cand
+                        self.app.logger.info(f"Serial auto-detect: {cand} @ {self.baudrate}")
+                        return
+                    except Exception:
+                        continue
+                self._ser = None
+                return
+            # explicit port
+            norm = self._normalize_port(port_cfg)
+            self._ser = serial.Serial(norm, self.baudrate, timeout=self.timeout)
+            self._current_port = port_cfg
+            self.app.logger.info(f"Serial abierto en {port_cfg} @ {self.baudrate}")
         except Exception as e:
             self.app.logger.error(f"No se pudo abrir el puerto {self.port_name}: {e}")
+            # Fallback: if the configured port no existe, intente auto-detectar
+            if isinstance(e, FileNotFoundError):
+                for cand in self._scan_candidates():
+                    try:
+                        norm = self._normalize_port(cand)
+                        self._ser = serial.Serial(norm, self.baudrate, timeout=self.timeout)
+                        self._current_port = cand
+                        self.app.logger.info(f"Serial fallback a {cand} @ {self.baudrate}")
+                        return
+                    except Exception:
+                        continue
             self._ser = None
 
     def start(self):
@@ -279,8 +335,21 @@ class SerialManager:
                     persona = db.session.get(Persona, fid)
                     if persona is not None:
                         if getattr(persona, 'activo', True):
-                            db.session.add(Asistencia(person_id=persona.id))
-                            db.session.commit()
+                            # Anti-rebote: si hay asistencia reciente para el mismo ID, ignorar
+                            now_dt = datetime.now(self.app.tz) if self.app.config.get("TIME_USE_LOCAL", True) else datetime.utcnow().replace(tzinfo=timezone.utc).astimezone(self.app.tz)
+                            last_dt = self._last_fnd.get(persona.id)
+                            window = float(self.app.config.get("DUPLICATE_WINDOW_SEC", 60.0))
+                            if last_dt is not None and (now_dt - last_dt).total_seconds() < window:
+                                self._append_log(f"IGN> FND duplicado {fid} en {int((now_dt-last_dt).total_seconds())}s")
+                            else:
+                                # Store timestamp either in local tz (naive) or UTC (naive)
+                                if self.app.config.get("TIME_USE_LOCAL", True):
+                                    ts = now_dt.replace(tzinfo=None)
+                                else:
+                                    ts = now_dt.astimezone(timezone.utc).replace(tzinfo=None)
+                                db.session.add(Asistencia(person_id=persona.id, timestamp=ts))
+                                db.session.commit()
+                                self._last_fnd[persona.id] = now_dt
                         else:
                             self._append_log(f"IGN> Persona {fid} inactiva; asistencia ignorada")
             # Optional: handle DEL_OK/DEL_FAIL if you add delete route
@@ -337,6 +406,31 @@ def create_app() -> Flask:
         except Exception:
             return dt.strftime(fmt)
 
+    # Horarios y tardanzas
+    def _parse_hhmm(s: str) -> Tuple[int, int]:
+        try:
+            h, m = s.strip().split(":", 1)
+            return int(h), int(m)
+        except Exception:
+            return 8, 0
+
+    app.start_time_default = app.config.get("START_TIME", "08:00")  # type: ignore[attr-defined]
+    app.tardy_tol_min = int(app.config.get("TARDINESS_TOL_MIN", 10))  # type: ignore[attr-defined]
+    try:
+        app.schedule_by_grade = json.loads(app.config.get("SCHEDULE_BY_GRADE") or "{}")  # type: ignore[attr-defined]
+    except Exception:
+        app.schedule_by_grade = {}  # type: ignore[attr-defined]
+
+    def _get_scheduled_local(persona, day_local: datetime):
+        # Returns a local datetime for scheduled start
+        hh, mm = _parse_hhmm(app.start_time_default)  # type: ignore[attr-defined]
+        if persona and getattr(persona, "grado", None):
+            g = persona.grado
+            s = app.schedule_by_grade.get(g) if isinstance(app.schedule_by_grade, dict) else None  # type: ignore[attr-defined]
+            if s:
+                hh, mm = _parse_hhmm(str(s))
+        return datetime(day_local.year, day_local.month, day_local.day, hh, mm, 0)
+
     def _build_report_rows(asist_list, tzinfo):
         # Build entrada/salida pairs per person per local date
         from collections import defaultdict
@@ -344,9 +438,18 @@ def create_app() -> Flask:
         person_map = {}
         for a in asist_list:
             dt = a.timestamp
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            loc = dt.astimezone(tzinfo)
+            if app.config.get("TIME_USE_LOCAL", True):
+                # stored as local naive
+                if dt.tzinfo is None:
+                    loc = dt.replace(tzinfo=tzinfo)
+                else:
+                    loc = dt.astimezone(tzinfo)
+            else:
+                # stored as UTC naive
+                if dt.tzinfo is None:
+                    loc = dt.replace(tzinfo=timezone.utc).astimezone(tzinfo)
+                else:
+                    loc = dt.astimezone(tzinfo)
             key = (a.person_id, loc.date())
             bucket[key].append(loc)
             if a.persona:
@@ -359,6 +462,15 @@ def create_app() -> Flask:
                 salida = times[i + 1] if i + 1 < len(times) else None
                 dur_min = int(((salida - entrada).total_seconds() // 60) if salida else 0)
                 p = person_map.get(pid)
+                # Calcular tardanza según horario configurado
+                sched_local = _get_scheduled_local(p, datetime(day.year, day.month, day.day, 0, 0, 0))
+                tol = app.tardy_tol_min  # type: ignore[attr-defined]
+                tardanza = 0
+                try:
+                    if entrada > sched_local and ((entrada - sched_local).total_seconds() // 60) > tol:
+                        tardanza = int((entrada - sched_local).total_seconds() // 60) - tol
+                except Exception:
+                    tardanza = 0
                 rows.append({
                     "fecha": day.isoformat(),
                     "person_id": pid,
@@ -369,6 +481,7 @@ def create_app() -> Flask:
                     "entrada": entrada.strftime('%H:%M:%S'),
                     "salida": salida.strftime('%H:%M:%S') if salida else "",
                     "duracion_min": dur_min,
+                    "tardanza_min": tardanza,
                 })
         # Order by date, name, entrada
         rows.sort(key=lambda r: (r["fecha"], r["nombre"] or "", r["entrada"]))
@@ -408,6 +521,9 @@ def create_app() -> Flask:
         fecha = request.args.get("fecha")  # YYYY-MM-DD (compat)
         desde = request.args.get("desde")  # YYYY-MM-DD
         hasta = request.args.get("hasta")  # YYYY-MM-DD
+        grado_f = request.args.get("grado")
+        seccion_f = request.args.get("seccion")
+        qname = request.args.get("q")
         q = (request.args.get("q") or "").strip()
         solo_activos = request.args.get("solo_activos") in ("1", "true", "on", "True")
         try:
@@ -462,8 +578,17 @@ def create_app() -> Flask:
                 asist_query = asist_query.filter(Asistencia.timestamp.between(d0, d1))
         except Exception:
             pass
+        # Join persona to enable filters by rol, grado, seccion, nombre
+        asist_query = asist_query.join(Persona)
         if rol:
-            asist_query = asist_query.join(Persona).filter(Persona.rol == rol)
+            asist_query = asist_query.filter(Persona.rol == rol)
+        if grado_f:
+            asist_query = asist_query.filter(Persona.grado == grado_f)
+        if seccion_f:
+            asist_query = asist_query.filter(Persona.seccion == seccion_f)
+        if qname:
+            like = f"%{qname}%"
+            asist_query = asist_query.filter(Persona.nombre.ilike(like))
         # For Toma tab, show fewer rows by default
         default_limit = 20 if tab == "toma" else 100
         asistencias = asist_query.limit(default_limit).all()
@@ -472,8 +597,27 @@ def create_app() -> Flask:
 
         # Derived report rows when requested
         report_rows = []
+        report_summary = {}
         if tab == "reportes":
             report_rows = _build_report_rows(asistencias, app.tz)
+            # Build summary
+            try:
+                total = len(report_rows)
+                tard_count = sum(1 for r in report_rows if r.get("tardanza_min", 0) and r.get("tardanza_min", 0) > 0)
+                tard_min = sum(int(r.get("tardanza_min", 0) or 0) for r in report_rows)
+                dur_min = sum(int(r.get("duracion_min", 0) or 0) for r in report_rows)
+                prom_dur = int(dur_min / total) if total else 0
+                personas_unicas = len({r["person_id"] for r in report_rows})
+                report_summary = {
+                    "total_registros": total,
+                    "personas": personas_unicas,
+                    "tardanzas": tard_count,
+                    "min_tardanza": tard_min,
+                    "min_duracion": dur_min,
+                    "prom_duracion": prom_dur,
+                }
+            except Exception:
+                report_summary = {}
 
         return render_template(
             "index.html",
@@ -487,12 +631,15 @@ def create_app() -> Flask:
             tab=tab,
             timezone_name=app.config.get("TIMEZONE", "UTC"),
             report_rows=report_rows,
+            report_summary=report_summary,
             q=q,
             page=page,
             pages=personas_pages,
             total=personas_total,
             per_page=per_page,
             solo_activos=solo_activos,
+            grado=grado_f or "",
+            seccion=seccion_f or "",
         )
 
     # Friendly tab routes
@@ -682,21 +829,26 @@ def create_app() -> Flask:
 
         result = serial_manager.wait_reg_result(fid, app.config.get("REG_TIMEOUT", 30.0))
         if result == "REG_OK":
+            # éxito: marcar huella
             persona.huella_guardada = True
             db.session.commit()
             if _wants_json():
                 return jsonify({"status": "ok", "id": fid})
-            flash(f"Registro exitoso de {nombre} (ID {fid})", "success")
-            return redirect(url_for("index"))
+            flash(f"Registro exitoso de {nombre} (ID {fid}, rol {rol})", "success")
+            return redirect(url_for("index", tab="personas"))
         else:
-            # Timeout or REG_FAIL -> remove persona
-            db.session.delete(persona)
-            db.session.commit()
+            # fallo o timeout: eliminar fila creada y no volver a tocar 'persona'
+            pid_tmp = persona.id
+            try:
+                db.session.delete(persona)
+                db.session.commit()
+            finally:
+                persona = None  # evitar accesos posteriores
             if _wants_json():
                 return jsonify({"status": "fail", "reason": "timeout" if result is None else "reg_fail"}), 408 if result is None else 400
             motivo = "Tiempo agotado" if result is None else "Fallo de registro"
-            flash(f"Registro fallido (ID {fid}): {motivo}", "error")
-            return redirect(url_for("index"))
+            flash(f"Registro fallido (ID {pid_tmp}): {motivo}", "error")
+            return redirect(url_for("index", tab="registrar"))
 
     @app.post("/eliminar/<int:pid>")
     @login_required
@@ -751,6 +903,7 @@ def create_app() -> Flask:
                 "baudrate": app.config.get("SERIAL_BAUDRATE"),
             },
             "serial_open": bool(serial_manager and serial_manager._ser and serial_manager._ser.is_open),
+            "serial_in_use": getattr(serial_manager, "_current_port", None),
             "serial_enabled": bool(str(app.config.get("SERIAL_PORT", "")).strip().upper() not in {"", "OFF", "NONE", "DISABLE", "DISABLED"}),
             "available_ports": ports,
             "db_ok": True,
@@ -838,20 +991,26 @@ def create_app() -> Flask:
 
         asist_query = Asistencia.query.order_by(Asistencia.id.desc())
         try:
-            if desde or hasta:
+            if desde or hasta or fecha:
+                if fecha and not (desde or hasta):
+                    desde = fecha
+                    hasta = fecha
                 if desde:
-                    d0 = datetime.strptime(desde, "%Y-%m-%d")
+                    d0_local = datetime.strptime(desde, "%Y-%m-%d")
                 else:
-                    d0 = datetime(1970, 1, 1)
+                    d0_local = datetime(1970, 1, 1)
                 if hasta:
                     h = datetime.strptime(hasta, "%Y-%m-%d")
-                    d1 = datetime(h.year, h.month, h.day, 23, 59, 59)
+                    d1_local = datetime(h.year, h.month, h.day, 23, 59, 59)
                 else:
-                    d1 = datetime(2999, 12, 31, 23, 59, 59)
-                asist_query = asist_query.filter(Asistencia.timestamp.between(d0, d1))
-            elif fecha:
-                d0 = datetime.strptime(fecha, "%Y-%m-%d")
-                d1 = datetime(d0.year, d0.month, d0.day, 23, 59, 59)
+                    d1_local = datetime(2999, 12, 31, 23, 59, 59)
+                # If timestamps are stored in UTC, convert local range to UTC; otherwise use local naive
+                if not app.config.get("TIME_USE_LOCAL", True):
+                    d0 = d0_local.replace(tzinfo=app.tz).astimezone(timezone.utc).replace(tzinfo=None)
+                    d1 = d1_local.replace(tzinfo=app.tz).astimezone(timezone.utc).replace(tzinfo=None)
+                else:
+                    d0 = d0_local
+                    d1 = d1_local
                 asist_query = asist_query.filter(Asistencia.timestamp.between(d0, d1))
         except Exception:
             pass
@@ -861,8 +1020,14 @@ def create_app() -> Flask:
         asistencias = asist_query.limit(limit).all()
         out = []
         for a in asistencias:
-            # Treat stored timestamps as UTC naive
-            dt = a.timestamp.replace(tzinfo=timezone.utc)
+            # Build UTC timestamp depending on storage mode
+            if app.config.get("TIME_USE_LOCAL", True):
+                # Stored as local naive
+                dt_local = a.timestamp.replace(tzinfo=app.tz)
+                dt = dt_local.astimezone(timezone.utc)
+            else:
+                # Stored as UTC naive
+                dt = a.timestamp.replace(tzinfo=timezone.utc)
             out.append({
                 "id": a.id,
                 "person_id": a.person_id,
@@ -882,8 +1047,12 @@ def create_app() -> Flask:
         rol = request.args.get("rol")
         desde = request.args.get("desde")
         hasta = request.args.get("hasta")
+        grado_f = request.args.get("grado")
+        seccion_f = request.args.get("seccion")
+        qname = request.args.get("q")
+        persona_id = request.args.get("persona_id")
 
-        asist_query = Asistencia.query.order_by(Asistencia.timestamp.asc())
+        asist_query = Asistencia.query.order_by(Asistencia.timestamp.asc()).join(Persona)
         try:
             if desde or hasta:
                 if desde:
@@ -895,26 +1064,179 @@ def create_app() -> Flask:
                     d1 = datetime(h.year, h.month, h.day, 23, 59, 59)
                 else:
                     d1 = datetime(2999, 12, 31, 23, 59, 59)
+                # Convert range if storing UTC
+                if not app.config.get("TIME_USE_LOCAL", True):
+                    d0 = d0.replace(tzinfo=app.tz).astimezone(timezone.utc).replace(tzinfo=None)
+                    d1 = d1.replace(tzinfo=app.tz).astimezone(timezone.utc).replace(tzinfo=None)
                 asist_query = asist_query.filter(Asistencia.timestamp.between(d0, d1))
         except Exception:
             pass
         if rol:
-            asist_query = asist_query.join(Persona).filter(Persona.rol == rol)
+            asist_query = asist_query.filter(Persona.rol == rol)
+        if grado_f:
+            asist_query = asist_query.filter(Persona.grado == grado_f)
+        if seccion_f:
+            asist_query = asist_query.filter(Persona.seccion == seccion_f)
+        if persona_id:
+            try:
+                pid = int(persona_id)
+                asist_query = asist_query.filter(Asistencia.person_id == pid)
+            except Exception:
+                pass
+        if qname:
+            like = f"%{qname}%"
+            asist_query = asist_query.filter(Persona.nombre.ilike(like))
 
         asistencias = asist_query.all()
         rows = _build_report_rows(asistencias, app.tz)
+        # Summary
+        try:
+            total = len(rows)
+            tard_count = sum(1 for r in rows if r.get("tardanza_min", 0) and r.get("tardanza_min", 0) > 0)
+            tard_min = sum(int(r.get("tardanza_min", 0) or 0) for r in rows)
+            dur_min = sum(int(r.get("duracion_min", 0) or 0) for r in rows)
+            prom_dur = int(dur_min / total) if total else 0
+        except Exception:
+            total = tard_count = tard_min = dur_min = prom_dur = 0
 
         sio = StringIO()
-        w = csv.writer(sio)
-        w.writerow(["fecha", "person_id", "nombre", "rol", "grado", "seccion", "entrada", "salida", "duracion_min"])
+        delim = request.args.get("delim") or app.config.get("CSV_DELIMITER", ",")
+        # Excel hint for delimiter + BOM for UTF-8
+        try:
+            sio.write("\ufeff")  # BOM
+            sio.write(f"sep={delim}\n")
+        except Exception:
+            pass
+        w = csv.writer(sio, delimiter=delim)
+        w.writerow(["fecha", "person_id", "nombre", "rol", "grado", "seccion", "entrada", "salida", "tardanza_min", "duracion_min"])
         for r in rows:
             w.writerow([
-                r["fecha"], r["person_id"], r["nombre"], r["rol"], r.get("grado"), r.get("seccion"), r["entrada"], r["salida"], r["duracion_min"],
+                r["fecha"], r["person_id"], r["nombre"], r["rol"], r.get("grado"), r.get("seccion"), r["entrada"], r["salida"], r.get("tardanza_min", 0), r["duracion_min"],
             ])
+        # Add summary at the end
+        w.writerow([])
+        w.writerow(["Resumen"])
+        w.writerow(["total_registros", total])
+        w.writerow(["tardanzas", tard_count])
+        w.writerow(["min_tardanza", tard_min])
+        w.writerow(["min_duracion", dur_min])
+        w.writerow(["prom_duracion", prom_dur])
         resp = make_response(sio.getvalue())
         resp.headers["Content-Type"] = "text/csv; charset=utf-8"
         fname_date = datetime.now().strftime("%Y%m%d")
         resp.headers["Content-Disposition"] = f"attachment; filename=reporte_{fname_date}.csv"
+        return resp
+
+    @app.get("/api/reportes.xlsx")
+    @login_required
+    def api_reportes_xlsx():
+        try:
+            import openpyxl
+            from openpyxl.styles import Font
+        except Exception:
+            return jsonify({"error": "openpyxl no instalado"}), 501
+
+        rol = request.args.get("rol")
+        desde = request.args.get("desde")
+        hasta = request.args.get("hasta")
+        grado_f = request.args.get("grado")
+        seccion_f = request.args.get("seccion")
+        qname = request.args.get("q")
+        persona_id = request.args.get("persona_id")
+
+        asist_query = Asistencia.query.order_by(Asistencia.timestamp.asc()).join(Persona)
+        try:
+            if desde or hasta:
+                if desde:
+                    d0 = datetime.strptime(desde, "%Y-%m-%d")
+                else:
+                    d0 = datetime(1970, 1, 1)
+                if hasta:
+                    h = datetime.strptime(hasta, "%Y-%m-%d")
+                    d1 = datetime(h.year, h.month, h.day, 23, 59, 59)
+                else:
+                    d1 = datetime(2999, 12, 31, 23, 59, 59)
+                if not app.config.get("TIME_USE_LOCAL", True):
+                    d0 = d0.replace(tzinfo=app.tz).astimezone(timezone.utc).replace(tzinfo=None)
+                    d1 = d1.replace(tzinfo=app.tz).astimezone(timezone.utc).replace(tzinfo=None)
+                asist_query = asist_query.filter(Asistencia.timestamp.between(d0, d1))
+        except Exception:
+            pass
+        if rol:
+            asist_query = asist_query.filter(Persona.rol == rol)
+        if grado_f:
+            asist_query = asist_query.filter(Persona.grado == grado_f)
+        if seccion_f:
+            asist_query = asist_query.filter(Persona.seccion == seccion_f)
+        if persona_id:
+            try:
+                pid = int(persona_id)
+                asist_query = asist_query.filter(Asistencia.person_id == pid)
+            except Exception:
+                pass
+        if qname:
+            like = f"%{qname}%"
+            asist_query = asist_query.filter(Persona.nombre.ilike(like))
+
+        asistencias = asist_query.all()
+        rows = _build_report_rows(asistencias, app.tz)
+        # Summary
+        try:
+            total = len(rows)
+            tard_count = sum(1 for r in rows if r.get("tardanza_min", 0) and r.get("tardanza_min", 0) > 0)
+            tard_min = sum(int(r.get("tardanza_min", 0) or 0) for r in rows)
+            dur_min = sum(int(r.get("duracion_min", 0) or 0) for r in rows)
+            prom_dur = int(dur_min / total) if total else 0
+        except Exception:
+            total = tard_count = tard_min = dur_min = prom_dur = 0
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Reportes"
+        # Summary sheet
+        ws_sum = wb.create_sheet("Resumen", 0)
+        ws_sum.append(["Métrica", "Valor"])
+        for c in ws_sum[1]:
+            c.font = Font(bold=True)
+        for k, v in (
+            ("Total registros", total),
+            ("Personas", len({r["person_id"] for r in rows})),
+            ("Tardanzas", tard_count),
+            ("Minutos de tardanza", tard_min),
+            ("Minutos de duración", dur_min),
+            ("Promedio duración (min)", prom_dur),
+        ):
+            ws_sum.append([k, v])
+        ws_sum.column_dimensions['A'].width = 28
+        ws_sum.column_dimensions['B'].width = 18
+        ws_sum.freeze_panes = "A2"
+        headers = ["fecha", "person_id", "nombre", "rol", "grado", "seccion", "entrada", "salida", "tardanza_min", "duracion_min"]
+        ws.append(headers)
+        for c in ws[1]:
+            c.font = Font(bold=True)
+        for r in rows:
+            ws.append([
+                r["fecha"], r["person_id"], r["nombre"], r["rol"], r.get("grado"), r.get("seccion"), r["entrada"], r["salida"], r.get("tardanza_min", 0), r["duracion_min"],
+            ])
+        # Ajuste básico de anchos
+        for col in ws.columns:
+            maxlen = 0
+            col_letter = col[0].column_letter
+            for cell in col:
+                val = str(cell.value) if cell.value is not None else ""
+                if len(val) > maxlen:
+                    maxlen = len(val)
+            ws.column_dimensions[col_letter].width = min(maxlen + 2, 40)
+        ws.freeze_panes = "A2"
+        ws.auto_filter.ref = ws.dimensions
+
+        from io import BytesIO
+        bio = BytesIO()
+        wb.save(bio)
+        resp = make_response(bio.getvalue())
+        resp.headers["Content-Type"] = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        fname_date = datetime.now().strftime("%Y%m%d")
+        resp.headers["Content-Disposition"] = f"attachment; filename=reporte_{fname_date}.xlsx"
         return resp
 
     @app.get("/api/personas.csv")
@@ -957,7 +1279,12 @@ def create_app() -> Flask:
             d0 = d0
 
         sio = StringIO()
-        w = csv.writer(sio)
+        delim = request.args.get("delim") or app.config.get("CSV_DELIMITER", ",")
+        try:
+            sio.write("\ufeff"); sio.write(f"sep={delim}\n")
+        except Exception:
+            pass
+        w = csv.writer(sio, delimiter=delim)
         w.writerow(["id", "nombre", "rol", "grado", "seccion", "documento", "activo", "huella_guardada", "asistencias_count"])
         for p in personas:
             q = Asistencia.query.filter_by(person_id=p.id)
@@ -991,20 +1318,25 @@ def create_app() -> Flask:
 
         asist_query = Asistencia.query.order_by(Asistencia.id.desc())
         try:
-            if desde or hasta:
+            if desde or hasta or fecha:
+                if fecha and not (desde or hasta):
+                    desde = fecha
+                    hasta = fecha
                 if desde:
-                    d0 = datetime.strptime(desde, "%Y-%m-%d")
+                    d0_local = datetime.strptime(desde, "%Y-%m-%d")
                 else:
-                    d0 = datetime(1970, 1, 1)
+                    d0_local = datetime(1970, 1, 1)
                 if hasta:
                     h = datetime.strptime(hasta, "%Y-%m-%d")
-                    d1 = datetime(h.year, h.month, h.day, 23, 59, 59)
+                    d1_local = datetime(h.year, h.month, h.day, 23, 59, 59)
                 else:
-                    d1 = datetime(2999, 12, 31, 23, 59, 59)
-                asist_query = asist_query.filter(Asistencia.timestamp.between(d0, d1))
-            elif fecha:
-                d0 = datetime.strptime(fecha, "%Y-%m-%d")
-                d1 = datetime(d0.year, d0.month, d0.day, 23, 59, 59)
+                    d1_local = datetime(2999, 12, 31, 23, 59, 59)
+                if not app.config.get("TIME_USE_LOCAL", True):
+                    d0 = d0_local.replace(tzinfo=app.tz).astimezone(timezone.utc).replace(tzinfo=None)
+                    d1 = d1_local.replace(tzinfo=app.tz).astimezone(timezone.utc).replace(tzinfo=None)
+                else:
+                    d0 = d0_local
+                    d1 = d1_local
                 asist_query = asist_query.filter(Asistencia.timestamp.between(d0, d1))
         except Exception:
             pass
@@ -1017,7 +1349,12 @@ def create_app() -> Flask:
             asistencias = asist_query.all()
 
         sio = StringIO()
-        w = csv.writer(sio)
+        delim = request.args.get("delim") or app.config.get("CSV_DELIMITER", ",")
+        try:
+            sio.write("\ufeff"); sio.write(f"sep={delim}\n")
+        except Exception:
+            pass
+        w = csv.writer(sio, delimiter=delim)
         w.writerow(["id", "person_id", "persona_nombre", "persona_rol", "timestamp"])
         for a in asistencias:
             nombre = a.persona.nombre if a.persona else None
@@ -1032,7 +1369,8 @@ def create_app() -> Flask:
 
     # Start serial worker once (can be disabled via SERIAL_PORT)
     global serial_manager
-    if os.environ.get("WERKZEUG_RUN_MAIN") != "true":
+    # In debug, only start the worker in the reloader child process
+    if os.environ.get("WERKZEUG_RUN_MAIN") == "true" or not app.debug:
         port_cfg = str(app.config.get("SERIAL_PORT", "")).strip()
         if port_cfg and port_cfg.upper() not in {"OFF", "NONE", "DISABLE", "DISABLED"}:
             # Avoid double thread on debug reload
@@ -1047,4 +1385,7 @@ def create_app() -> Flask:
 app = create_app()
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    import os as _os
+    _debug = (_os.getenv("FLASK_DEBUG", "0") == "1")
+    # Run without reloader to avoid double-opening the serial port
+    app.run(host="0.0.0.0", port=5000, debug=_debug, use_reloader=False)

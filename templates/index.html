@@ -4,7 +4,7 @@
 {% if tab=='registrar' %}
 <article>
   <h4>Registrar nueva Persona</h4>
-  <form method="post" action="{{ url_for('registrar') }}">
+  <form id="form-registrar" method="post" action="{{ url_for('registrar') }}">
     <div class="grid">
       <input type="text" name="nombre" placeholder="Nombre" required />
       <select name="rol" required>
@@ -12,13 +12,66 @@
         <option value="PROFESOR">PROFESOR</option>
         <option value="PERSONAL">PERSONAL</option>
       </select>
-      <input type="text" name="grado" placeholder="Grado/Área (opcional)" />
-      <input type="text" name="seccion" placeholder="Sección/Turno (opcional)" />
+      <select name="grado">
+        <option value="Preprimaria" selected>Preprimaria</option>
+        <option value="Primero">Primero</option>
+        <option value="Segundo">Segundo</option>
+        <option value="Tercero">Tercero</option>
+        <option value="Cuarto">Cuarto</option>
+        <option value="Quinto">Quinto</option>
+        <option value="Sexto">Sexto</option>
+      </select>
+      <select name="seccion">
+        <option value="A" selected>A</option>
+        <option value="B">B</option>
+      </select>
       <input type="text" name="documento" placeholder="Documento (DNI/Código)" />
       <button type="submit">Registrar y capturar huella</button>
     </div>
   </form>
   <p class="muted">El navegador esperará la respuesta del Arduino. Mantén el dedo en el sensor cuando se indique.</p>
+  <dialog id="dlg-registro">
+    <article>
+      <h4>Captura de huella</h4>
+      <ol id="steps-registro">
+        <li id="step1">1) Pon tu dedo en el lector…</li>
+        <li id="step2" class="muted">2) Quita el dedo cuando se indique…</li>
+        <li id="step3" class="muted">3) Vuelve a poner tu dedo…</li>
+      </ol>
+      <p class="muted">No cierres esta ventana hasta que finalice (REG_OK o REG_FAIL).</p>
+    </article>
+  </dialog>
+  <script>
+    (function(){
+      const f = document.getElementById('form-registrar');
+      const dlg = document.getElementById('dlg-registro');
+      const s1 = document.getElementById('step1');
+      const s2 = document.getElementById('step2');
+      const s3 = document.getElementById('step3');
+      let polling = false, timer = null;
+      function setActive(el){ if(!el) return; el.classList.remove('muted'); el.style.fontWeight='600'; }
+      function setMuted(el){ if(!el) return; el.classList.add('muted'); el.style.fontWeight=''; }
+      async function pollSerial(){
+        if (!polling) return;
+        try {
+          const r = await fetch('/serial?limit=40', { headers: { 'Accept': 'application/json' }});
+          const data = await r.json();
+          const txt = (Array.isArray(data.log) ? data.log.join(' ') : '').toLowerCase();
+          if (txt.includes('coloque el dedo para la primera imagen') || txt.includes('primera imagen')) { setActive(s1); setMuted(s2); setMuted(s3); }
+          if (txt.includes('retire el dedo')) { setActive(s2); }
+          if (txt.includes('nuevamente')) { setActive(s3); }
+          if (txt.includes('reg_ok')) { stopPolling(); try { dlg.close(); } catch(e) {} }
+          if (txt.includes('reg_fail')) { stopPolling(); try { dlg.close(); } catch(e) {} }
+        } catch(e) {}
+        timer = setTimeout(pollSerial, 600);
+      }
+      function startPolling(){ if (polling) return; polling = true; setActive(s1); setMuted(s2); setMuted(s3); pollSerial(); }
+      function stopPolling(){ polling = false; if(timer){ clearTimeout(timer); timer=null; } }
+      if (f && dlg && dlg.showModal) {
+        f.addEventListener('submit', function(){ try { dlg.showModal(); } catch(e) {} startPolling(); });
+      }
+    })();
+  </script>
 </article>
 {% endif %}
 
@@ -48,6 +101,7 @@
       <span class="muted">Total: {{ total }}</span>
     </div>
   </form>
+  <div class="table-wrap">
   <table>
     <thead>
       <tr>
@@ -74,7 +128,9 @@
         <td>{% if p.activo %}<span class="ok">ACTIVO</span>{% else %}<span class="fail">INACTIVO</span>{% endif %}</td>
         <td>{% if p.huella_guardada %}<span class="ok">OK</span>{% else %}<span class="fail">PENDIENTE</span>{% endif %}</td>
         <td>
-          <div style="display:flex; gap:.5rem; align-items:center;">
+          <div class="actions">
+            <a role="button" class="secondary" href="/api/reportes.csv?persona_id={{ p.id }}&desde={{ desde }}&hasta={{ hasta }}&rol={{ p.rol }}&grado={{ p.grado or '' }}&seccion={{ p.seccion or '' }}">CSV alumno</a>
+            <a role="button" class="secondary" href="/api/reportes.xlsx?persona_id={{ p.id }}&desde={{ desde }}&hasta={{ hasta }}&rol={{ p.rol }}&grado={{ p.grado or '' }}&seccion={{ p.seccion or '' }}">XLSX alumno</a>
             <form method="post" action="{{ url_for('toggle_persona', pid=p.id) }}">
               <button type="submit" class="secondary">{% if p.activo %}Desactivar{% else %}Activar{% endif %}</button>
             </form>
@@ -116,6 +172,7 @@
       {% endfor %}
     </tbody>
   </table>
+  </div>
   <nav aria-label="pagination" style="display:flex; gap:.5rem; align-items:center;">
     {% set prev_page = page-1 %}
     {% set next_page = page+1 %}
@@ -146,6 +203,7 @@
       <a id="export-csv-link" href="/api/asistencias.csv?desde={{ desde }}&hasta={{ hasta }}&rol={{ rol }}" role="button" class="secondary">Exportar CSV</a>
     </div>
   </form>
+  <div class="table-wrap">
   <table>
     <thead>
       <tr>
@@ -166,6 +224,7 @@
       {% endfor %}
     </tbody>
   </table>
+  </div>
   <small class="muted">Zona horaria: {{ timezone_name }} • Actualizado: <span id="asistencias-updated">—</span></small>
 </article>
 {% endif %}
@@ -187,6 +246,7 @@
     <button type="button" id="btn-kiosk" class="secondary" style="float:right">Pantalla completa</button>
   </h4>
   <p class="muted">Coloca el dedo en el lector cuando esté conectado. Las lecturas aparecerán aquí en tiempo real.</p>
+  <div class="table-wrap">
   <table>
     <thead>
       <tr>
@@ -207,6 +267,7 @@
       {% endfor %}
     </tbody>
   </table>
+  </div>
   <small class="muted">Mostrando las 20 asistencias más recientes.</small>
 </article>
 {% endif %}
@@ -214,7 +275,7 @@
 {% if tab=='reportes' %}
 <article>
   <h4>Reportes (Entrada/Salida derivado)</h4>
-  <form method="get" action="/">
+  <form id="form-reportes" method="get" action="/">
     <input type="hidden" name="tab" value="reportes" />
     <div class="grid">
       <input type="date" name="desde" value="{{ desde }}" placeholder="Desde" />
@@ -225,8 +286,30 @@
         <option value="PROFESOR" {% if rol=='PROFESOR' %}selected{% endif %}>PROFESOR</option>
         <option value="PERSONAL" {% if rol=='PERSONAL' %}selected{% endif %}>PERSONAL</option>
       </select>
+      <select name="grado">
+        <option value="">Todos los grados</option>
+        {% for g in ['Preprimaria','Primero','Segundo','Tercero','Cuarto','Quinto','Sexto'] %}
+        <option value="{{ g }}" {% if request.args.get('grado')==g %}selected{% endif %}>{{ g }}</option>
+        {% endfor %}
+      </select>
+      <select name="seccion">
+        <option value="">Todas las secciones</option>
+        <option value="A" {% if request.args.get('seccion')=='A' %}selected{% endif %}>A</option>
+        <option value="B" {% if request.args.get('seccion')=='B' %}selected{% endif %}>B</option>
+      </select>
+      <input type="search" name="q" placeholder="Buscar por nombre" value="{{ request.args.get('q','') }}" />
       <button type="submit">Filtrar</button>
-      <a id="export-reportes-csv" href="/api/reportes.csv?desde={{ desde }}&hasta={{ hasta }}&rol={{ rol }}" role="button" class="secondary">Exportar CSV</a>
+      <a id="export-reportes-csv" href="/api/reportes.csv?desde={{ desde }}&hasta={{ hasta }}&rol={{ rol }}&grado={{ request.args.get('grado','') }}&seccion={{ request.args.get('seccion','') }}&q={{ request.args.get('q','') }}" role="button" class="secondary">Exportar CSV</a>
+      <a id="export-reportes-xlsx" href="/api/reportes.xlsx?desde={{ desde }}&hasta={{ hasta }}&rol={{ rol }}&grado={{ request.args.get('grado','') }}&seccion={{ request.args.get('seccion','') }}&q={{ request.args.get('q','') }}" role="button" class="secondary">Exportar XLSX</a>
+    </div>
+    <div class="grid" style="margin-top:.25rem">
+      <small class="muted">Rangos rápidos:</small>
+      <div>
+        <button type="button" id="rango-hoy" class="secondary">Hoy</button>
+        <button type="button" id="rango-semana" class="secondary">Esta semana</button>
+        <button type="button" id="rango-mes" class="secondary">Este mes</button>
+        <button type="button" id="rango-limpiar" class="secondary">Limpiar</button>
+      </div>
     </div>
   </form>
   <table>
@@ -239,7 +322,10 @@
         <th>Sección</th>
         <th>Entrada</th>
         <th>Salida</th>
+        <th>Tardanza (min)</th>
         <th>Duración (min)</th>
+        <th>CSV</th>
+        <th>XLSX</th>
       </tr>
     </thead>
     <tbody>
@@ -252,12 +338,52 @@
         <td>{{ r.seccion or '—' }}</td>
         <td>{{ r.entrada }}</td>
         <td>{{ r.salida if r.salida else '—' }}</td>
+        <td>{% if r.tardanza_min and r.tardanza_min>0 %}<span class="fail">{{ r.tardanza_min }}</span>{% else %}—{% endif %}</td>
         <td>{{ r.duracion_min }}</td>
+        <td><a href="/api/reportes.csv?persona_id={{ r.person_id }}&desde={{ desde }}&hasta={{ hasta }}&rol={{ r.rol }}&grado={{ r.grado or '' }}&seccion={{ r.seccion or '' }}" class="secondary">CSV</a></td>
+        <td><a href="/api/reportes.xlsx?persona_id={{ r.person_id }}&desde={{ desde }}&hasta={{ hasta }}&rol={{ r.rol }}&grado={{ r.grado or '' }}&seccion={{ r.seccion or '' }}" class="secondary">XLSX</a></td>
       </tr>
       {% endfor %}
     </tbody>
   </table>
+  {% if report_summary %}
+  <div class="muted" style="margin-top:.5rem">
+    <strong>Resumen:</strong>
+    Registros: {{ report_summary.total_registros }} · Personas: {{ report_summary.personas }} · Tardanzas: {{ report_summary.tardanzas }} · Min. tardanza: {{ report_summary.min_tardanza }} · Min. duración: {{ report_summary.min_duracion }} · Prom. duración: {{ report_summary.prom_duracion }}
+  </div>
+  {% endif %}
 </article>
+<script>
+  (function(){
+    function pad(n){ return n<10?('0'+n):(''+n); }
+    function ymd(d){ return d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate()); }
+    const f = document.getElementById('form-reportes');
+    if(!f) return;
+    const desde = f.querySelector('input[name="desde"]');
+    const hasta = f.querySelector('input[name="hasta"]');
+    function setRange(d0, d1){ if(desde) desde.value = ymd(d0); if(hasta) hasta.value = ymd(d1); f.submit(); }
+    const btnHoy = document.getElementById('rango-hoy');
+    const btnSemana = document.getElementById('rango-semana');
+    const btnMes = document.getElementById('rango-mes');
+    const btnLimpiar = document.getElementById('rango-limpiar');
+    if(btnHoy) btnHoy.addEventListener('click', ()=>{ const t=new Date(); setRange(t,t); });
+    if(btnSemana) btnSemana.addEventListener('click', ()=>{
+      const t=new Date();
+      const dow = t.getDay(); // 0=Dom
+      const diff = (dow===0?6:dow-1); // lunes como inicio
+      const d0=new Date(t); d0.setDate(t.getDate()-diff);
+      const d1=new Date(d0); d1.setDate(d0.getDate()+6);
+      setRange(d0,d1);
+    });
+    if(btnMes) btnMes.addEventListener('click', ()=>{
+      const t=new Date();
+      const d0=new Date(t.getFullYear(), t.getMonth(), 1);
+      const d1=new Date(t.getFullYear(), t.getMonth()+1, 0);
+      setRange(d0,d1);
+    });
+    if(btnLimpiar) btnLimpiar.addEventListener('click', ()=>{ if(desde) desde.value=''; if(hasta) hasta.value=''; f.submit(); });
+  })();
+</script>
 {% endif %}
 
 {% if tab in ['mensajes','toma'] %}

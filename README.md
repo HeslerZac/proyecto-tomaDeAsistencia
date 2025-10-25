@@ -1,73 +1,75 @@
-# Local Web Server for Fingerprint Reader (Flask + PostgreSQL)
+﻿# Proyecto de Asistencias (Flask + PostgreSQL + Arduino)
 
-Bridge between Arduino (fingerprint) via Serial and a PostgreSQL database with a simple web UI to register people and log attendance.
+Servidor local (web) que integra un lector de huella en Arduino vía Serial, guarda asistencias en PostgreSQL y ofrece un dashboard para registrar personas, tomar asistencia, reportar y exportar.
 
-## Requirements
+## Tecnologías
 - Python 3.10+
-- PostgreSQL local or remote
-- Arduino connected over USB (sketch must follow the serial protocol)
+- Flask, Flask-SQLAlchemy, Flask-Login, Flask‑WTF
+- PostgreSQL (driver psycopg v3)
+- pyserial (hilo de lectura Serial)
+- openpyxl (exportación XLSX)
+- PicoCSS (UI simple y responsiva)
 
-## Install
-1) Create venv and install deps:
-```
+## Requisitos
+- Python 3.10+ en Windows
+- PostgreSQL en local (o remoto)
+- Arduino (UNO u otro) conectado por USB con el sketch incluido (protocolo serie)
+
+## Instalación
+1) Crear entorno e instalar dependencias:
+`
 python -m venv .venv
-. .venv/Scripts/activate   # Windows PowerShell
+. .venv/Scripts/activate   # PowerShell
 pip install -r requirements.txt
-```
-2) Configure environment:
-- Copy `.env.example` to `.env` and edit:
-  - `DATABASE_URL=postgresql+psycopg://user:pass@host:5432/asistencias`
-  - `SERIAL_PORT=COM3` (adjust to your system)
-  - `SERIAL_BAUDRATE=9600` (must match Arduino Serial.begin)
+`
+2) Configurar variables:
+- Copia .env.example a .env y ajusta credenciales de DB y Serial. Ejemplo:
+`
+DATABASE_URL=postgresql+psycopg://postgres:TU_PASSWORD@localhost:5432/asistencias
+SERIAL_PORT=COM10
+SERIAL_BAUDRATE=9600
+FLASK_ENV=production
+FLASK_DEBUG=0
+TIMEZONE=America/Guatemala
+TIME_USE_LOCAL=1
+DUPLICATE_WINDOW_SEC=60
+START_TIME=08:00
+TARDINESS_TOL_MIN=10
+SCHEDULE_BY_GRADE={"Preprimaria":"08:15","Primero":"08:00","Segundo":"08:00","Tercero":"08:00","Cuarto":"07:45","Quinto":"07:45","Sexto":"07:45"}
+CSV_DELIMITER=;
+`
+3) Crear base (si no existe) y usuario (opcional):
+`
+psql -U postgres -h localhost -d postgres -c "CREATE DATABASE asistencias;"
+`
 
-3) Create DB if needed:
-```
-createdb asistencias
-```
-
-## Run
-```
+## Ejecutar
+`
 python app.py
-```
-- Open http://localhost:5000.
-- The registration form sends `R,<ID>` to Arduino and waits for `REG_OK`/`REG_FAIL`.
-- The serial worker logs `FND,<ID>` as attendance automatically.
-- The People table shows a button to delete the stored fingerprint; it sends `E,<ID>` and waits for `DEL_OK`/`DEL_FAIL`.
-- The People table also includes a button to delete the Person completely (DB + fingerprint). It attempts `E,<ID>` first and then removes the DB record (and their attendance). You can tick a checkbox to force DB deletion even if sensor deletion fails/timeouts.
- - Attendance auto-refreshes every 5s and can be exported as CSV respecting current filters via the "Exportar CSV" button (or `GET /api/asistencias.csv?desde=YYYY-MM-DD&hasta=YYYY-MM-DD&rol=...`).
- - UI timezone: set `TIMEZONE` in `.env` (default `UTC`); server renders dates in that zone and JSON includes `timestamp_utc`.
+`
+Abre http://localhost:5000. Login por defecto: crea usuario en /users o setea ADMIN_USERNAME/ADMIN_PASSWORD en .env (se crea solo al iniciar si la tabla está vacía).
 
-## Serial Protocol
-- All commands end with `\n`:
-  - Flask -> Arduino: `R,<ID>` (start registration)
-  - Arduino -> Flask: `REG_OK,<ID>` | `REG_FAIL`
-  - Arduino -> Flask: `FND,<ID>` when a finger is recognized
-  - (Optional) Flask -> Arduino: `E,<ID>` and Arduino -> Flask: `DEL_OK,<ID>` | `DEL_FAIL`
-  - Implemented UI button calls POST `/eliminar/<ID>` and updates `huella_guardada` on `DEL_OK`.
-  - Full delete calls POST `/persona/<ID>/borrar` and removes DB rows (and tries sensor delete first).
-  - CSV export (asistencias): `GET /api/asistencias.csv?desde=YYYY-MM-DD&hasta=YYYY-MM-DD&rol=ALUMNO|PROFESOR|PERSONAL&limit=...` returns `text/csv` with headers `id,person_id,persona_nombre,persona_rol,timestamp`. Single-day `fecha=YYYY-MM-DD` is also supported for compatibility.
-  - CSV export (personas): `GET /api/personas.csv?desde=YYYY-MM-DD&hasta=YYYY-MM-DD` returns `text/csv` with headers `id,nombre,rol,huella_guardada,asistencias_count`.
+## Protocolo Serial
+- Comandos con \n:
+  - Flask → Arduino: R,<ID> (registrar), E,<ID> (eliminar)
+  - Arduino → Flask: REG_OK,<ID> | REG_FAIL | DEL_OK,<ID> | DEL_FAIL | FND,<ID>
+- El servidor ignora FND duplicado del mismo ID durante DUPLICATE_WINDOW_SEC.
 
-## Structure
-- `app.py`: Flask app, models, routes, serial worker (thread) and protocol handling.
-- `templates/`: simple HTML (PicoCSS) for dashboard.
-- `config.py`: configuration via environment variables.
+## Funcionalidades
+- Personas: registro con rol (ALUMNO/PROFESOR/PERSONAL), grado (Preprimaria–Sexto), sección (A/B), documento (único), activar/desactivar, CSV/XLSX por alumno.
+- Toma: asistencias en vivo (panel), modo pantalla completa.
+- Reportes: filtros por fechas, rol, grado, sección y nombre; cálculo de tardanza (según horario y tolerancia); exportación CSV/XLSX (incluye hojas Resumen y Resumen por alumno).
+- Mensajes: log TX/RX del serial. Health: /health (puertos disponibles, estado del serial).
 
-## Notes
-- The serial thread starts once and tries to reconnect if the port fails.
-- `/registrar` waits up to 30s for `REG_OK`/`REG_FAIL` and updates/removes the Persona accordingly.
-- Sensor IDs are the PK of `persona` table. The smallest free positive integer is assigned.
-- Allowed roles: `ALUMNO`, `PROFESOR`, `PERSONAL`.
+## Notas de uso
+- Cierra el Monitor Serie del IDE para liberar el COM antes de usar la app.
+- Si el COM cambia (al reconectar), actualiza SERIAL_PORT o usa SERIAL_PORT=AUTO.
+- El sketch Arduino evita duplicar una misma huella entre personas (chequeo tras el primer escaneo).
 
-## Sketch compatibility
-- Update Arduino sketch to:
-  - Read lines from Serial ending with `\n`.
-  - On `R,<ID>` call `registrarHuella(ID)` and send `REG_OK,<ID>` or `REG_FAIL`.
-  - Inside `reconocerHuella()` when found, send `FND,<ID>` immediately.
-- Serial speed: 9600 (matches `SERIAL_BAUDRATE`).
+## Problemas frecuentes
+- Serial “Acceso denegado”: otra app tiene abierto el puerto (cerrar Monitores Serie / reiniciar). Ejecutar sin reloader (FLASK_ENV=production).
+- CSV en una columna: usa CSV_DELIMITER=; (por defecto) o añade ?delim=, a la URL para coma.
+- XLSX 501: instalar dependencias pip install -r requirements.txt (openpyxl).
 
-## Troubleshooting
-- If serial cannot open, verify `SERIAL_PORT` (on Windows check Device Manager: COMx).
-- With Flask `debug=True`, the reloader spawns twice; protected to avoid duplicate serial thread.
-- For remote PostgreSQL, ensure firewall and credentials allow connection.
- - Check `/health` for serial status and available COM ports.
+## Licencia
+Proyecto bajo licencia MIT (ver LICENSE).
